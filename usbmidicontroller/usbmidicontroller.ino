@@ -6,6 +6,7 @@ const int recording_pin = 9;
 const int recording_indicator_pin = 8;
 bool isRecording = false;
 bool canCheckRecord = true;
+int num_recorded_notes = 0;
 int rec_timestamp = 0;
 int prevNote = 0;
 int channel = 0;
@@ -13,6 +14,14 @@ int noteMap[25][2] = {{349, 48}, {359, 49}, {371, 50}, {382, 51}, {395, 52}, {40
                 {423, 54}, {438, 55}, {455, 56}, {470, 57}, {490, 58}, {510, 59},
                 {531, 60}, {556, 61}, {580, 62}, {609, 63}, {640, 64}, {675, 65},
                 {710, 66}, {753, 67}, {800, 68}, {850, 69}, {910, 70}, {975, 71}, {1024, 72}};
+
+int track1[300][3];
+int track2[300][3];
+
+int track1_length = 0;
+bool track1_ready = false;
+unsigned long track1_start = 0;
+int currNote = 0;
 
 
 void setup() {
@@ -23,23 +32,55 @@ void setup() {
   Serial.begin(9600);
   controlChange(0, 7, 1);
   MidiUSB.flush();
-  pinMode(5, OUTPUT);
+  
 }
 
 void loop() {
+
+  
+    
     int softpot = analogRead(softpot_pin);
     if (softpot != 0) {
       int note = checkNote(softpot);
       if (prevNote != note) {
         noteOn(channel, note, 64);
-        allNotesOff(note);
+        allNotesOff(note, channel);
+        if (isRecording && num_recorded_notes < 300) {
+          track1[num_recorded_notes][0] = channel;
+          track1[num_recorded_notes][1] = note;
+          track1[num_recorded_notes][2] = millis() - rec_timestamp;
+          num_recorded_notes++;
+        }
       }
       prevNote = note;
     }
     else {
-      allNotesOff(0);
+      allNotesOff(0, channel);
       prevNote = 0;
+      if (isRecording && num_recorded_notes < 300) {
+        track1[num_recorded_notes][0] = 100; // absurd channel number to indicate all notes off
+      }
     }
+    if (track1_ready) {
+      if (millis() - track1_start >= track1[currNote][2]) {
+        if (track1[currNote][0] == 100) {
+          allNotesOff(0, 0);
+          //Serial.println("Silence");
+        }
+        else {
+          if (track1[currNote][1] != 0) {
+            noteOn(track1[currNote][0], track1[currNote][1], 64);
+            allNotesOff(track1[currNote][1], track1[currNote][0]);
+          }
+        }
+        currNote++;
+      }
+      if ((unsigned long)(millis() - track1_start) >= track1_length) {
+        currNote = 0;
+        track1_start = millis();
+      }
+    }
+    
     MidiUSB.flush();
 
     checkRecordingStatus(isRecording);
@@ -90,10 +131,10 @@ void pitchBend(byte channel, int value) {
 ////////////////////////////////////////////////////////////////////////////
 
 // Turns off all notes EXCEPT the parameter
-void allNotesOff(int on) {
+void allNotesOff(int on, int ch) {
   for (int i = 0; i < 25; i++) {
     if (noteMap[i][1] != on) {
-      noteOff(channel, noteMap[i][1], 64);
+      noteOff(ch, noteMap[i][1], 64);
     }
   }
 }
@@ -119,6 +160,9 @@ void checkRecordingStatus(bool wasRecording) {
     }
     if (wasRecording == true && button_pressed == 0) {
       isRecording = false;
+      track1_length = millis() - rec_timestamp;
+      track1_ready = true;
+      track1_start = millis();
       rec_timestamp = millis();
       canCheckRecord = false;
     }
