@@ -18,6 +18,7 @@ int noteMap[25][2] = {{349, 48}, {359, 49}, {371, 50}, {382, 51}, {395, 52}, {40
 
 int tracks[num_tracks][max_notes_per_track][3]; // [track][notes][channel, note, timestamp]
 unsigned long track_data[num_tracks][5]; // [track][length, ready, start, currNote, num_recorded_notes]
+bool tracks_ready[num_tracks];
 int total_used = 0;
 
 void setup() {
@@ -59,7 +60,10 @@ void loop() {
         prevNote = 0;
         if (isRecording && track_data[channel][4] < max_notes_per_track) { // currNote < notes per track
           tracks[channel][track_data[channel][4]][0] = 100; // absurd channel number to indicate all notes off
-        }                     // currNote
+                              // currNote 
+          tracks[channel][track_data[channel][4]][2] = millis() - rec_timestamp;
+          track_data[channel][4]++;
+        }
       }
     }
 
@@ -67,12 +71,12 @@ void loop() {
     //////////////////////////////////// Looping ////////////////////////////
 
     for (int i = 0; i < num_tracks; i++) { // Loop through each available track
-      if (track_data[i][1]) { // if track ready
+      if (tracks_ready[i]) { // if track ready // track_data[i][1]
         // If current time has arrived at the next note (millis - start >= note timestamp)
         if (millis() - track_data[i][2] >= tracks[i][track_data[i][3]][2]) {
           if (tracks[i][track_data[i][3]][0] == 100) { // if current note channel is 100
             // Turn off all notes
-            allNotesOff(0, 0);
+            allNotesOff(0, i);
             MidiUSB.flush();
             total_used++;
           }
@@ -173,12 +177,12 @@ void checkRecordingStatus(bool wasRecording) {
       rec_timestamp = millis();
       canCheckRecord = false;
       track_data[channel][4] = 0; //num_recorded_notes = 0
-      track_data[channel][1] = (unsigned long)false;
+      tracks_ready[channel] = false; //track_data[channel][1] = (unsigned long)false;
     }
     if (wasRecording == true && button_pressed == 0) {
       isRecording = false;
       track_data[channel][0] = millis() - rec_timestamp; //length = millis() - rec_timestamp;
-      track_data[channel][1] = (unsigned long)true; //ready = true;
+      tracks_ready[channel] = true; //track_data[channel][1] = (unsigned long)true; //ready = true;
       track_data[channel][2] = millis(); //start = millis();
       track_data[channel][3] = 0; // currNote = 0
       rec_timestamp = millis();
