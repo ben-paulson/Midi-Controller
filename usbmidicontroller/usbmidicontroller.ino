@@ -2,6 +2,8 @@
 
 const int softpot_pin = A0;
 const int channel_pin = A1;
+const int joystick_y_pin = A3;
+const int square_output_pin = 5;
 const int recording_pin = 9;
 const int recording_indicator_pin = 8;
 bool isRecording = false;
@@ -10,6 +12,8 @@ bool canCheckRecord = true;
 int num_recorded_notes = 0;
 int rec_timestamp = 0;
 int prevNote = 0;
+int prevNote_index = 0;
+int prevPot = 0;
 int channel = 0;
 int noteMap[25][2] = {{349, 48}, {359, 49}, {371, 50}, {382, 51}, {395, 52}, {409, 53},
                 {423, 54}, {438, 55}, {455, 56}, {470, 57}, {490, 58}, {510, 59},
@@ -26,93 +30,147 @@ bool track_ready = false;
 unsigned long track_start = 0;
 int currNote = 0;
 
+bool play_semitones = false;
+int start_pot = 0;
 
 void setup() {
   pinMode(softpot_pin, INPUT);
   pinMode(channel_pin, INPUT);
+  pinMode(square_output_pin, OUTPUT);
+  pinMode(joystick_y_pin, INPUT);
   pinMode(recording_pin, INPUT_PULLUP);
   pinMode(recording_indicator_pin, OUTPUT);
   Serial.begin(9600);
-  controlChange(0, 7, 1);
-  MidiUSB.flush();
   
 }
 
 void loop() {
+
+  
+  //int bend = analogRead(joystick_y_pin);
+  //Serial.println(map(bend, 0, 1023, -8192, 8192));
+  //pitchBend(channel, map(bend, 0, 1023, -8190, 8190));
+
+  //Serial.print(bend); Serial.print(", "); Serial.println(y);
+  int softpot = analogRead(softpot_pin);
+  if (softpot != 0) {
+    int note = checkNote(softpot);
+
+    /////////////////// SQUARE WAVE //////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////
     
-    int softpot = analogRead(softpot_pin);
-    if (softpot != 0) {
-      int note = checkNote(softpot);
-      if (prevNote != note && !channel_ready[channel]) {
-        noteOn(channel, note, 64);    // Live playing
-        allNotesOff(note, channel);
-        if (isRecording && num_recorded_notes < SIZE) {
-          track[num_recorded_notes][0] = channel;      // Recording
-          track[num_recorded_notes][1] = note;
-          track[num_recorded_notes][2] = millis() - rec_timestamp;
-          num_recorded_notes++;
+    int noteIndex = 0;
+      for (int i = 0; i < 25; i++) {
+        if (noteMap[i][1] == note) {
+          noteIndex = i;
+          break;
         }
       }
-      prevNote = note;
-    }
-    else {
-      if (!channel_ready[channel]) {
-        allNotesOff(0, channel);    // Live
-        prevNote = 0;
-        if (isRecording && num_recorded_notes < SIZE && track[num_recorded_notes - 1][1] != -1) {
-          track[num_recorded_notes][0] = channel; // Recording
-          track[num_recorded_notes][1] = -1; // absurd note number to indicate all notes off
-          track[num_recorded_notes][2] = millis() - rec_timestamp;
-          num_recorded_notes++;
-        }
-      }
-    }
-    // Looping
-    if (track_ready) {
-      // If time has passed when the next note is scheduled to play
-      if (millis() - track_start >= track[currNote][2]) {
-        // Notes off message
-        if (track[currNote][1] == -1) {
-          allNotesOff(0, track[currNote][0]);
-        }
-        else {
-          // All other messages, play only if channel is ready (i.e. not currently recording on the channel)
-          if (track[currNote][1] != 0 && channel_ready[track[currNote][0]]) {
-            noteOn(track[currNote][0], track[currNote][1], 64);
-            allNotesOff(track[currNote][1], track[currNote][0]);
-          }
-        }
-        currNote++;
-      }
-      if ((unsigned long)(millis() - track_start) >= track_length) {
-        // All additional tracks beyond the first, so all tracks are the same length
-        if (isRecording) {
-          isRecording = false;
-          sort(track);
-          channel_ready[channel] = true;
-        }
-        // Start 2nd, 3rd, etc. track at the same time as the others repeat so all tracks are the same length
-        if (isWaiting) {
-          isWaiting = false;
-          isRecording = true;
-          rec_timestamp = millis();
-        }
-        // General reset
-        currNote = 0;
-        track_start = millis();
-      }
-    }
+    int prev_pot_val;
+    if (noteIndex == 0) prev_pot_val = 0;
+    else prev_pot_val = noteMap[noteIndex - 1][0];
     
-    MidiUSB.flush();
+    float semitone = (float)(softpot - prev_pot_val) / (float)(noteMap[noteIndex][0] - prev_pot_val);
+    unsigned int midi_to_freq;
+    if (play_semitones) {
+      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)(((note + semitone) - 69) / 12.0))));
+      if (abs(prevNote_index - noteIndex > 1))
+        start_pot = softpot;
+    } else {
+      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)((note - 69) / 12.0))));
+      if (prevNote == 0 || abs(prevNote_index - noteIndex) > 1)
+        start_pot = softpot;
+    }
+    tone(square_output_pin, midi_to_freq);
 
-    checkRecordingStatus(isRecording);
-    digitalWrite(recording_indicator_pin, isRecording);
+    if (abs(softpot - start_pot) > ((noteMap[noteIndex][0] - prev_pot_val) * 0.5) && prevNote != 0 && abs(prevNote_index - noteIndex) < 2)
+      play_semitones = true;
+    if (abs(prevNote_index - noteIndex) > 1)
+      play_semitones = false;
 
-    int channel_data = analogRead(channel_pin);
-    channel = map(channel_data, 0, 1023, 0, 5);
-    if (channel_data > 1000) channel = 15;
-    delay(50);
+    /////////////////// END SQUARE WAVE /////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////
 
+    
+    if (prevNote != note && !channel_ready[channel]) {
+      
+      //noteOn(channel, note, 64);    // Live playing
+      //allNotesOff(note, channel);
+      
+      if (isRecording && num_recorded_notes < SIZE) {
+        track[num_recorded_notes][0] = channel;      // Recording
+        track[num_recorded_notes][1] = note;
+        track[num_recorded_notes][2] = millis() - rec_timestamp;
+        num_recorded_notes++;
+      }
+    }
+    prevNote = note;
+    prevPot = softpot;
+    prevNote_index = noteIndex;
+  }
+  else {
+    if (!channel_ready[channel]) {
+      // Midi
+      //allNotesOff(0, channel);    // Live
+      prevNote = 0;
+      // Turn off sq wave and reset sliding semitones
+      noTone(square_output_pin);
+      play_semitones = false;
+      
+      if (isRecording && num_recorded_notes < SIZE && track[num_recorded_notes - 1][1] != -1) {
+        track[num_recorded_notes][0] = channel; // Recording
+        track[num_recorded_notes][1] = -1; // absurd note number to indicate all notes off
+        track[num_recorded_notes][2] = millis() - rec_timestamp;
+        num_recorded_notes++;
+      }
+    }
+  }
+  // Looping
+  if (track_ready) {
+    // If time has passed when the next note is scheduled to play
+    if (millis() - track_start >= track[currNote][2]) {
+      // Notes off message
+      if (track[currNote][1] == -1) {
+        //allNotesOff(0, track[currNote][0]);
+      }
+      else {
+        // All other messages, play only if channel is ready (i.e. not currently recording on the channel)
+        if (track[currNote][1] != 0 && channel_ready[track[currNote][0]]) {
+          //noteOn(track[currNote][0], track[currNote][1], 64);
+          //allNotesOff(track[currNote][1], track[currNote][0]);
+        }
+      }
+      currNote++;
+    }
+    if ((unsigned long)(millis() - track_start) >= track_length) {
+      // All additional tracks beyond the first, so all tracks are the same length
+      if (isRecording) {
+        isRecording = false;
+        sort(track);
+        channel_ready[channel] = true;
+      }
+      // Start 2nd, 3rd, etc. track at the same time as the others repeat so all tracks are the same length
+      if (isWaiting) {
+        isWaiting = false;
+        isRecording = true;
+        rec_timestamp = millis();
+      }
+      // General reset
+      currNote = 0;
+      track_start = millis();
+    }
+  }
+  
+  //MidiUSB.flush();
+
+  checkRecordingStatus(isRecording);
+  digitalWrite(recording_indicator_pin, isRecording);
+
+  int channel_data = analogRead(channel_pin);
+  //Serial.println(channel_data);
+  channel = map(channel_data, 0, 1023, 0, 5);
+  if (channel_data > 1000) channel = 15;
+  delay(10);
 
 }
 
