@@ -1,11 +1,17 @@
 #include "MIDIUSB.h"
+#include <SPI.h>
 
 const int softpot_pin = A0;
 const int channel_pin = A1;
-const int joystick_y_pin = A3;
+const int attack_pin = A2;
+const int decay_pin = A6;
+const int sustain_pin = A7;
+const int release_pin = A8;
+const int lfo_freq_pin = A10;
+const int lfo_amp_pin = A3;
 const int square_output_pin = 5;
 const int recording_pin = 9;
-const int recording_indicator_pin = 8;
+const int recording_indicator_pin = 7;
 bool isRecording = false;
 bool isWaiting = false;
 bool canCheckRecord = true;
@@ -33,19 +39,86 @@ int currNote = 0;
 bool play_semitones = false;
 int start_pot = 0;
 
+int cs_pin = 3;
+unsigned long attack_start = 0;
+int last_vol_level = 0;
+bool released = false;
+unsigned long release_start = 0;
+bool decaying = false;
+unsigned long decay_start = 0;
+
 void setup() {
   pinMode(softpot_pin, INPUT);
   pinMode(channel_pin, INPUT);
   pinMode(square_output_pin, OUTPUT);
-  pinMode(joystick_y_pin, INPUT);
   pinMode(recording_pin, INPUT_PULLUP);
   pinMode(recording_indicator_pin, OUTPUT);
+  pinMode(attack_pin, INPUT);
+  pinMode(decay_pin, INPUT);
+  pinMode(sustain_pin, INPUT);
+  pinMode(release_pin, INPUT);
+  pinMode(cs_pin, OUTPUT);
+  pinMode(lfo_freq_pin, INPUT);
+  pinMode(lfo_amp_pin, INPUT);
+  SPI.begin();
   Serial.begin(9600);
   
 }
 
 void loop() {
 
+  digitalWrite(cs_pin, LOW);
+  SPI.transfer(0);
+
+  // Attack
+  if (attack_start != 0) {
+    released = false;
+    int a_duration = 2 * analogRead(attack_pin); // "A" potentiometer
+    delay(2);
+    float a_done = (float)(millis() - attack_start) / (float)a_duration;
+    
+    if (a_done <= 1.0) {
+      
+      last_vol_level = (int)(a_done * 128);
+    } else {
+      last_vol_level = 128;
+      attack_start = 0;
+      decaying = true;
+      decay_start = millis();
+    }
+    SPI.transfer(last_vol_level);
+  }
+  
+  // Decay to sustain level
+  if (decaying) {
+    int sustain_level = map(analogRead(sustain_pin), 0, 1023, 0, 128);
+    delay(2);
+    int d_duration = analogRead(decay_pin);
+    delay(2);
+    if (d_duration == 0) d_duration = 10;
+    float d_done = (float)(millis() - decay_start) / (float)d_duration; // percent done with decay stage
+    if (d_done <= 1.0) {
+      last_vol_level = map(d_done * 100.0, 0, 100, 128, sustain_level); // map percent completion to max volume -> sustain level
+    } else {
+      last_vol_level = sustain_level;
+      decaying = false;
+    }
+    SPI.transfer(last_vol_level);
+  }
+
+  // Release
+  if (released) {
+    decaying = false;
+    int r_duration = analogRead(release_pin); // "R" potentiometer
+    delay(2);
+    float r_done = (float)(millis() - release_start) / (float)r_duration;
+    if (r_done <= 1.0) {
+      SPI.transfer((int) ((1 - r_done) * last_vol_level)); // Start at previous volume level rather than the max
+    } else {
+      SPI.transfer(0);
+      noTone(square_output_pin);
+    }
+  }
   
   //int bend = analogRead(joystick_y_pin);
   //Serial.println(map(bend, 0, 1023, -8192, 8192));
@@ -53,6 +126,9 @@ void loop() {
 
   //Serial.print(bend); Serial.print(", "); Serial.println(y);
   int softpot = analogRead(softpot_pin);
+  delay(2);
+  if (softpot < 10) softpot = 0;
+  //Serial.println(softpot);
   if (softpot != 0) {
     int note = checkNote(softpot);
 
@@ -70,23 +146,42 @@ void loop() {
     if (noteIndex == 0) prev_pot_val = 0;
     else prev_pot_val = noteMap[noteIndex - 1][0];
     
+    // Calculate semitones to be added if sliding is enabled
     float semitone = (float)(softpot - prev_pot_val) / (float)(noteMap[noteIndex][0] - prev_pot_val);
+
+    // Calculate LFO variables for vibrato
+    float lfo_amplitude = analogRead(lfo_amp_pin) / 500.0;
+    delay(2);
+    float lfo_freq = map(analogRead(lfo_freq_pin), 0, 1023, 50, 15); // 25 sounds normal, higher = slower; lower = faster
+    delay(2);
+    float lfo_offset = lfo_amplitude * sin((float)millis() / lfo_freq);
+    
     unsigned int midi_to_freq;
     if (play_semitones) {
-      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)(((note + semitone) - 69) / 12.0))));
-      if (abs(prevNote_index - noteIndex > 1))
+      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)(((note + semitone + lfo_offset) - 69) / 12.0))));
+      if (abs(prevNote_index - noteIndex > 1)) {
         start_pot = softpot;
+        SPI.transfer(0);
+        attack_start = millis();
+      }
     } else {
-      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)((note - 69) / 12.0))));
-      if (prevNote == 0 || abs(prevNote_index - noteIndex) > 1)
+      midi_to_freq = (unsigned int) (440.0 * (pow(2.0, (float)(((note + lfo_offset) - 69) / 12.0))));
+      if (prevNote == 0 || abs(prevNote_index - noteIndex) > 1) {
         start_pot = softpot;
+        SPI.transfer(0);
+        attack_start = millis();
+      }
     }
     tone(square_output_pin, midi_to_freq);
 
+    // Check if finger slides along softpot or if it jumps notes
     if (abs(softpot - start_pot) > ((noteMap[noteIndex][0] - prev_pot_val) * 0.5) && prevNote != 0 && abs(prevNote_index - noteIndex) < 2)
       play_semitones = true;
-    if (abs(prevNote_index - noteIndex) > 1)
+    if (abs(prevNote_index - noteIndex) > 1) {
       play_semitones = false;
+      SPI.transfer(0);
+      attack_start = millis();
+    }
 
     /////////////////// END SQUARE WAVE /////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////
@@ -112,10 +207,15 @@ void loop() {
     if (!channel_ready[channel]) {
       // Midi
       //allNotesOff(0, channel);    // Live
-      prevNote = 0;
-      // Turn off sq wave and reset sliding semitones
-      noTone(square_output_pin);
+      // Set release phase to begin (square wave output only)
+      if (prevNote != 0) {
+        released = true;
+        release_start = millis();
+      }
+      attack_start = 0;
       play_semitones = false;
+      
+      prevNote = 0;
       
       if (isRecording && num_recorded_notes < SIZE && track[num_recorded_notes - 1][1] != -1) {
         track[num_recorded_notes][0] = channel; // Recording
@@ -170,6 +270,8 @@ void loop() {
   //Serial.println(channel_data);
   channel = map(channel_data, 0, 1023, 0, 5);
   if (channel_data > 1000) channel = 15;
+
+  digitalWrite(cs_pin, HIGH);
   delay(10);
 
 }
